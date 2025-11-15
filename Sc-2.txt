@@ -1,0 +1,335 @@
+--[[ 
+======================================================
+DC : Drized - AI Auto Walk + Polygon Patrol
+Features:
+- Points + Polygon boundary
+- Draw polygon lines (3D Parts)
+- Draw walking path (3D Part)
+- Auto Walk to nearest Tokens inside Polygon
+- Patrol in Polygon when no Tokens
+- Highlight nearest Token inside Polygon
+======================================================
+]]
+
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local PointHeight = 3
+local LineColor = Color3.fromRGB(0,200,255)
+local PathColor = Color3.fromRGB(0,255,0)
+local TokenHighlightColor = Color3.fromRGB(255,255,0)
+local TokenHighlightSize = Vector3.new(4,4,4)
+local AutoWalk = false
+
+local BoundaryPoints = {}
+local CurrentPatrolIndex = 1
+
+--=====================================================
+-- 1) UI
+--=====================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = Player:WaitForChild("PlayerGui")
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 260, 0, 380)
+Main.Position = UDim2.new(0.05,0,0.1,0)
+Main.BackgroundColor3 = Color3.fromRGB(25,25,25)
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+
+-- Resize handle
+local Resize = Instance.new("Frame")
+Resize.Size = UDim2.new(0,20,0,20)
+Resize.Position = UDim2.new(1,-20,1,-20)
+Resize.BackgroundColor3 = Color3.fromRGB(60,60,60)
+Resize.Active = true
+Resize.Parent = Main
+Resize.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		local start = input.Position
+		local startSize = Main.Size
+		local move, release
+		move = UIS.InputChanged:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseMovement then
+				local delta = i.Position - start
+				Main.Size = UDim2.new(0, math.max(240,startSize.X.Offset + delta.X), 0, math.max(280,startSize.Y.Offset + delta.Y))
+			end
+		end)
+		release = UIS.InputEnded:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 then
+				move:Disconnect()
+				release:Disconnect()
+			end
+		end)
+	end
+end)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1,0,0,40)
+Title.BackgroundTransparency = 1
+Title.Text = "Token Auto Farm"
+Title.TextColor3 = Color3.new(1,1,1)
+Title.TextScaled = true
+Title.Parent = Main
+
+local function MakeButton(text, y)
+	local B = Instance.new("TextButton")
+	B.Size = UDim2.new(1,-20,0,40)
+	B.Position = UDim2.new(0,10,0,y)
+	B.BackgroundColor3 = Color3.fromRGB(40,40,40)
+	B.TextColor3 = Color3.new(1,1,1)
+	B.TextScaled = true
+	B.Text = text
+	B.BorderSizePixel = 0
+	B.Parent = Main
+	return B
+end
+
+local Btn_AddPoint = MakeButton("➕ Add Point", 50)
+local Btn_Delete = MakeButton("🗑 Delete Points", 95)
+local Btn_Rename = MakeButton("✏ Rename Last Point", 140)
+local Btn_AutoWalk = MakeButton("🚶 Auto Walk: OFF", 185)
+local Btn_TP = MakeButton("📍 TP Center", 230)
+
+-- Popup Rename
+local Popup = Instance.new("Frame")
+Popup.Size = UDim2.new(0,240,0,150)
+Popup.BackgroundColor3 = Color3.fromRGB(30,30,30)
+Popup.Visible = false
+Popup.Position = UDim2.new(0.5,-120,0.5,-75)
+Popup.Parent = ScreenGui
+
+local RenameBox = Instance.new("TextBox")
+RenameBox.Size = UDim2.new(1,-20,0,40)
+RenameBox.Position = UDim2.new(0,10,0,10)
+RenameBox.PlaceholderText = "New Name..."
+RenameBox.BackgroundColor3 = Color3.fromRGB(50,50,50)
+RenameBox.TextColor3 = Color3.new(1,1,1)
+RenameBox.Text = ""
+RenameBox.Parent = Popup
+
+local Confirm = MakeButton("Confirm", 60)
+Confirm.Parent = Popup
+Confirm.Size = UDim2.new(1,-20,0,40)
+
+local Cancel = MakeButton("Cancel", 105)
+Cancel.Parent = Popup
+Cancel.Size = UDim2.new(1,-20,0,40)
+Cancel.MouseButton1Click:Connect(function()
+	Popup.Visible = false
+end)
+
+--=====================================================
+-- POINT / POLYGON FUNCTIONS
+--=====================================================
+local function HRP()
+	local c = Player.Character or Player.CharacterAdded:Wait()
+	return c:WaitForChild("HumanoidRootPart"), c:WaitForChild("Humanoid")
+end
+
+local LinesFolder = Instance.new("Folder")
+LinesFolder.Name = "BoundaryLines"
+LinesFolder.Parent = Workspace
+
+local PathFolder = Instance.new("Folder")
+PathFolder.Name = "PathLines"
+PathFolder.Parent = Workspace
+
+local function AddPointAtPlayer()
+	if #BoundaryPoints >= 5 then return end
+	local root = HRP()
+	local part = Instance.new("Part")
+	part.Anchored = true
+	part.CanCollide = false
+	part.Size = Vector3.new(1,1,1)
+	part.Position = root.Position
+	part.Transparency = 1
+	part.Parent = Workspace
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Adornee = part
+	billboard.Size = UDim2.new(0,100,0,30)
+	billboard.StudsOffset = Vector3.new(0,PointHeight,0)
+	billboard.AlwaysOnTop = true
+	billboard.Parent = part
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1,0,1,0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.TextColor3 = Color3.fromRGB(0,200,255)
+	textLabel.TextScaled = true
+	textLabel.Text = "Point "..#BoundaryPoints+1
+	textLabel.Parent = billboard
+
+	table.insert(BoundaryPoints,{pos=root.Position, name=textLabel.Text, part=part, text=textLabel})
+end
+
+local function DeleteAllPoints()
+	for _,p in ipairs(BoundaryPoints) do
+		if p.part then p.part:Destroy() end
+	end
+	BoundaryPoints = {}
+	LinesFolder:ClearAllChildren()
+	PathFolder:ClearAllChildren()
+end
+
+local function RenameLastPoint(txt)
+	if #BoundaryPoints>0 then
+		local p = BoundaryPoints[#BoundaryPoints]
+		p.name = txt
+		if p.text then p.text.Text = txt end
+	end
+end
+
+local function GetCenter()
+	if #BoundaryPoints<3 then return nil end
+	local sum = Vector3.zero
+	for _,p in ipairs(BoundaryPoints) do sum += p.pos end
+	return sum/#BoundaryPoints
+end
+
+local function UpdatePolygonLines()
+	LinesFolder:ClearAllChildren()
+	local n = #BoundaryPoints
+	if n < 2 then return end
+	for i=1,n do
+		local a = BoundaryPoints[i].pos
+		local b = BoundaryPoints[(i%n)+1].pos
+		local direction = b - a
+		local line = Instance.new("Part")
+		line.Anchored = true
+		line.CanCollide = false
+		line.Size = Vector3.new(0.2,0.2,direction.Magnitude)
+		line.CFrame = CFrame.new(a + direction/2, b)
+		line.Color = LineColor
+		line.Parent = LinesFolder
+	end
+end
+
+local function pointInPolygon(point, poly)
+	local inside = false
+	for i=1,#poly do
+		local A = poly[i]
+		local B = poly[(i%#poly)+1]
+		if ((A.Z>point.Z)~=(B.Z>point.Z)) and
+		   (point.X<(B.X-A.X)*(point.Z-A.Z)/(B.Z-A.Z)+A.X) then
+			inside = not inside
+		end
+	end
+	return inside
+end
+
+--=====================================================
+-- Highlight + Path + Auto Walk AI
+--=====================================================
+local HighlightPart = Instance.new("Part")
+HighlightPart.Size = TokenHighlightSize
+HighlightPart.Anchored = true
+HighlightPart.CanCollide = false
+HighlightPart.Transparency = 0.5
+HighlightPart.Color = TokenHighlightColor
+HighlightPart.Parent = Workspace
+
+local function FindNearestTokenInPolygon(rootPos)
+	local nearest = nil
+	local dist = nil
+	local poly = {}
+	for _,p in ipairs(BoundaryPoints) do table.insert(poly,p.pos) end
+	if #poly < 3 then return nil end
+	if Workspace:FindFirstChild("Tokens") then
+		for _,t in ipairs(Workspace.Tokens:GetChildren()) do
+			local target
+			if t:IsA("Model") then target = t:FindFirstChildWhichIsA("BasePart")
+			elseif t:IsA("BasePart") then target = t end
+			if target and pointInPolygon(target.Position, poly) then
+				local d = (target.Position - rootPos).Magnitude
+				if not dist or d < dist then
+					dist = d
+					nearest = target
+				end
+			end
+		end
+	end
+	return nearest
+end
+
+local function DrawPathLine(fromPos, toPos)
+	PathFolder:ClearAllChildren()
+	if not fromPos or not toPos then return end
+	local line = Instance.new("Part")
+	line.Anchored = true
+	line.CanCollide = false
+	line.Size = Vector3.new(0.2,0.2,(fromPos-toPos).Magnitude)
+	line.CFrame = CFrame.new(fromPos:Lerp(toPos,0.5), toPos)
+	line.Color = PathColor
+	line.Parent = PathFolder
+end
+
+local function PatrolPolygon(root, humanoid)
+	if #BoundaryPoints==0 then return end
+	local targetPos = BoundaryPoints[CurrentPatrolIndex].pos
+	if (targetPos - root.Position).Magnitude < 2 then
+		CurrentPatrolIndex += 1
+		if CurrentPatrolIndex > #BoundaryPoints then
+			CurrentPatrolIndex = 1
+		end
+	end
+	humanoid:MoveTo(targetPos)
+	DrawPathLine(root.Position, targetPos)
+end
+
+RunService.Heartbeat:Connect(function()
+	UpdatePolygonLines()
+	local root,hum = HRP()
+	if not root or not hum then return end
+
+	-- Find nearest token in polygon
+	local nearest = FindNearestTokenInPolygon(root.Position)
+	if nearest then
+		HighlightPart.CFrame = nearest.CFrame + Vector3.new(0,2,0)
+		HighlightPart.Transparency = 0.3
+	else
+		HighlightPart.Transparency = 1
+	end
+
+	-- Auto Walk
+	if AutoWalk then
+		if nearest then
+			hum:MoveTo(nearest.Position)
+			DrawPathLine(root.Position, nearest.Position)
+		else
+			PatrolPolygon(root, hum)
+		end
+	else
+		-- Do nothing if AutoWalk OFF
+	end
+end)
+
+--=====================================================
+-- Button Actions
+--=====================================================
+Btn_AddPoint.MouseButton1Click:Connect(AddPointAtPlayer)
+Btn_Delete.MouseButton1Click:Connect(DeleteAllPoints)
+Btn_Rename.MouseButton1Click:Connect(function()
+	Popup.Visible = true
+end)
+Confirm.MouseButton1Click:Connect(function()
+	RenameLastPoint(RenameBox.Text)
+	Popup.Visible = false
+end)
+Btn_AutoWalk.MouseButton1Click:Connect(function()
+	AutoWalk = not AutoWalk
+	Btn_AutoWalk.Text = AutoWalk and "🚶 Auto Walk: ON" or "🚶 Auto Walk: OFF"
+end)
+Btn_TP.MouseButton1Click:Connect(function()
+	local c = GetCenter()
+	if c then
+		local root,_ = HRP()
+		root.CFrame = CFrame.new(c+Vector3.new(0,3,0))
+	end
+end)
